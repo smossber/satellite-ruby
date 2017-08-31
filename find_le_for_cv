@@ -1,0 +1,267 @@
+#!/usr/bin/env ruby
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+
+require 'optparse'
+require 'yaml'
+require 'apipie-bindings'
+require 'highline/import'
+require 'time'
+require 'logging'
+require 'awesome_print'
+
+@defaults = {
+  :noop        => false,
+  :keep        => 5,
+  :uri         => 'https://localhost',
+  :timeout     => 300,
+  :user        => 'admin',
+  :pass        => nil,
+  :org         => 1,
+  :lifecycle   => 1,
+  :force       => false,
+  :wait        => false,
+  :sequential  => 0,
+  :promote_cvs => false,
+  :checkrepos  => false,
+  :verbose     => false,
+  :description => 'autopublish',
+  :verify_ssl  => true,
+}
+
+@options = {
+  :yamlfile  => 'cvmanager.yaml',
+}
+
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: #{opts.program_name} ACTION [options]"
+  opts.version = "0.1"
+  
+  opts.separator ""
+  opts.separator "#{opts.summary_indent}ACTION can be any of [clean,update,publish,promote]"
+  opts.separator ""
+
+  opts.on("-U", "--uri=URI", "URI to the Satellite") do |u|
+    @options[:uri] = u
+  end
+  opts.on("-t", "--timeout=TIMEOUT", OptionParser::DecimalInteger, "Timeout value in seconds for any API calls. -1 means never timeout") do |t|
+    @options[:timeout] = t
+  end
+  opts.on("-u", "--user=USER", "User to log in to Satellite") do |u|
+    @options[:user] = u
+  end
+  opts.on("-p", "--pass=PASS", "Password to log in to Satellite") do |p|
+    @options[:pass] = p
+  end
+  opts.on("-o", "--organization-id=ID", "ID of the Organization to manage CVs in") do |o|
+    @options[:org] = o
+  end
+  opts.on("-k", "--keep=NUM", OptionParser::DecimalInteger, "how many unused versions should be kept") do |k|
+    @options[:keep] = k
+  end
+  opts.on("-c", "--config=FILE", "configuration in YAML format") do |c|
+    @options[:yamlfile] = c
+  end
+  opts.on("-l", "--to-lifecycle-environment=ID", OptionParser::DecimalInteger, "which LE should the promote be done to") do |l|
+    @options[:lifecycle] = l
+  end
+  opts.on("-d", "--description=STRING", "Description to use for publish operations") do |d|
+    @options[:description] = d
+  end
+  opts.on("-n", "--noop", "do not actually execute anything") do
+    @options[:noop] = true
+  end
+  opts.on("-f", "--force", "force actions that otherwise would have been skipped") do
+    @options[:force] = true
+  end
+  opts.on("--wait", "wait for started tasks to finish") do
+    @options[:wait] = true
+  end
+  opts.on("--sequential [NUM]", OptionParser::DecimalInteger, "wait for each (or NUM) started task(s) to finish before starting the next one") do |s|
+    @options[:wait] = true
+    @options[:sequential] = s || 1
+  end
+  opts.on("--checkrepos", "check repository content was changed before publish") do
+    @options[:checkrepos] = true
+  end
+  opts.on("--verbose", "Get verbose logs from cvmanager") do
+    @options[:verbose] = true
+  end
+  opts.on("--no-verify-ssl", "don't verify SSL certs") do
+    @options[:verify_ssl] = false
+  end
+end
+optparse.parse!
+
+#if ARGV.empty?
+#  puts optparse.help
+#  exit
+#end
+
+#@yaml = YAML.load_file(@options[:yamlfile])
+#
+#if @yaml.has_key?(:settings) and @yaml[:settings].is_a?(Hash)
+#  @yaml[:settings].each do |key,val|
+#    if not @options.has_key?(key)
+#      @options[key] = val
+#    end
+#  end
+#end
+
+@defaults.each do |key,val|
+  if not @options.has_key?(key)
+    @options[key] = val
+  end
+end
+
+if not @options[:user]
+  @options[:user] = ask('Satellite username: ')
+end
+
+if not @options[:pass]
+  @options[:pass] = ask('Satellite password: ') { |q| q.echo = false }
+end
+
+# sanitize non-complete config files
+#[:cv, :ccv].each do |key|
+#  if not @yaml.has_key?(key)
+#    @yaml[key] = {}
+#  end
+#end
+#[:publish, :promote].each do |key|
+#  if not @yaml.has_key?(key)
+#    @yaml[key] = []
+#  end
+#end
+#
+
+oauth_consumer_key = '' # Dummy consumer key, change to yours
+secret_key = '' # Dummy shared secret, change to yours
+oauth_nonce = Random.rand(100000).to_s
+oauth_signature_method = 'HMAC-SHA1'
+oauth_timestamp = Time.now.to_i.to_s
+oauth_version = '1.0'
+
+parameters = 'oauth_consumer_key=' +
+              oauth_consumer_key +
+              '&oauth_nonce=' +
+              oauth_nonce +
+              '&oauth_signature_method=' +
+              oauth_signature_method +
+              '&oauth_timestamp=' +
+              oauth_timestamp +
+              '&oauth_version=' +
+              oauth_version
+base_string = 'GET&' + CGI.escape(@options[:uri]) + '&' + CGI.escape(parameters)
+oauth_signature = CGI.escape(Base64.encode64("#{OpenSSL::HMAC.digest('sha1',secret_key, base_string)}").chomp)
+
+@authenticator = ApipieBindings::Authenticators::Oauth.new('aYKtXTFNKsbGNZPkaKaEeBDpc4p6J8xb','oqxXYrUGnkpHvK4uL59F58cSmKrTWUBZ', {'FOREMAN-USER' => 'admin','oauth_nonce' => oauth_nonce, 'oauth_timestamp'=> oauth_timestamp, 'oauth_signature_method' => oauth_signature_method,'oauth_version' => oauth_version, 'oauth_signature' => oauth_signature})
+
+@api = ApipieBindings::API.new({:uri => @options[:uri], :api_version => '2', :timeout => @options[:timeout], :authenticator => @authenticator, :logger => Logging.logger(STDOUT)}, {:verify_ssl => @options[:verify_ssl]})
+
+
+
+def puts_verbose(message)
+  if @options[:verbose]
+    puts "    [VERBOSE] #{message}"
+  end
+end
+
+def get_lifecycle(le)
+  le = []
+  req = @api.resource(:environments).call(:index, {:organization_id => @options[:org], :full_results => true, :library => false})
+  le.concat(req['results'])
+  puts JSON.pretty_generate(le)
+end
+get_lifecycle("Pilot")
+
+def get_package_id(package_name)
+  package = []
+  req = @api.resource(:packages).call(:index, {:organization_id => @options[:org], :full_results => true, :search => package_name})
+  package.concat(req['results'])
+
+  if package.size > 2
+     puts "Too many results, try to narrow the search down"
+  elsif package.size < 2 
+     puts "No packages found"
+  elsif package.size == 1
+    puts  package.first['id']
+  end
+ # puts JSON.pretty_generate(package)
+end
+
+def get_les(cv_name)
+  cvs = []
+  req = @api.resource(:content_views).call(:index, {:organization_id => @options[:org], :full_results => true})
+  cvs.concat(req['results'])
+  while (req['results'].length == req['per_page'].to_i)
+    req = @api.resource(:content_views).call(:index, {:organization_id => @options[:org], :full_results => true, :per_page => req['per_page'], :page => req['page'].to_i+1})
+    cvs.concat(req['results'])
+  end
+  puts cv_name
+  cvs.each do |cv|
+    keep = []
+    if cv['name'] == cv_name 
+      puts "Inspecting #{cv['name']}"
+      cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
+        if not version['environment_ids'].empty?
+          puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) is published to the following environments: #{version['environment_ids']}, skipping."
+          next
+        end
+        version_details = @api.resource(:content_view_versions).call(:show, {:id => version['id']})
+        if not version_details['composite_content_view_ids'].empty?
+          puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) is used by the following composite contentviews: #{version_details['composite_content_view_ids']}, skipping."
+          next
+        end
+      end
+    end
+  end
+end
+
+def wait(tasks)
+  need_wait = tasks
+  if @options[:wait]
+    last_need_wait = []
+    silence = false
+    wait_secs = 0
+    while not need_wait.empty?
+      if wait_secs < 60
+        wait_secs += 10
+      end
+      puts "waiting #{wait_secs} for pending tasks: #{need_wait}" unless silence
+      sleep wait_secs
+      last_need_wait = need_wait
+      need_wait = []
+      tasks.each do |task_id|
+        req = @api.resource(:foreman_tasks).call(:show, {:id => task_id})
+        if req['pending']
+          need_wait << task_id
+        end
+      end
+      if (wait_secs >= 60 and (last_need_wait.sort == need_wait.sort))
+          puts "Silencing output until there's a task status change..." unless silence
+          silence = true
+      else
+          silence = false
+      end
+    end
+  end
+  return need_wait
+end
+
+action = ARGV.shift
+#get_les("cv-app")
+puts get_package_id("httpd")
