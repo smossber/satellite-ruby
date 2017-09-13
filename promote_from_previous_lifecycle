@@ -150,20 +150,7 @@ end
 #end
 #
 
-oauth_consumer_key = '' # Dummy consumer key, change to yours
-secret_key = '' # Dummy shared secret, change to yours
-oauth_nonce = Random.rand(100000).to_s
-oauth_signature_method = 'HMAC-SHA1'
-oauth_timestamp = Time.now.to_i.to_s
-oauth_version = '1.0'
-
-base_string = 'GET&' + CGI.escape(@options[:uri]) + '&' + CGI.escape(parameters)
-oauth_signature = CGI.escape(Base64.encode64("#{OpenSSL::HMAC.digest('sha1',secret_key, base_string)}").chomp)
-
-@authenticator = ApipieBindings::Authenticators::Oauth.new(oauth_consumer_key,secret_key, {'FOREMAN-USER' => 'admin','oauth_nonce' => oauth_nonce, 'oauth_timestamp'=> oauth_timestamp, 'oauth_signature_method' => oauth_signature_method,'oauth_version' => oauth_version, 'oauth_signature' => oauth_signature})
-
-@api = ApipieBindings::API.new({:uri => @options[:uri], :api_version => '2', :timeout => @options[:timeout], :authenticator => @authenticator},  {:verify_ssl => @options[:verify_ssl]})
-#@api = ApipieBindings::API.new({:uri => @options[:uri], :api_version => '2', :timeout => @options[:timeout], :authenticator => @authenticator, :logger => Logging.logger(STDOUT)},  {:verify_ssl => @options[:verify_ssl]})
+@api = ApipieBindings::API.new({:uri => @options[:uri], :username => @options[:user], :password => @options[:pass], :api_version => '2', :timeout => @options[:timeout]}, {:verify_ssl => @options[:verify_ssl]})
 
 
 
@@ -189,7 +176,6 @@ def get_lifecycle_environment(le_name)
 	  fail "Couldn't find any Lifecycle Environments"
   end
   if !req['results'].empty?
-	  #lifecycle_environment = le.concat(req['results']).first
 	  lifecycle_environment = req['results'].first
 	  return lifecycle_environment
   else
@@ -224,30 +210,37 @@ def get_cv_version_in_lifecycle_environment(cv_name, le_name)
     cvs.concat(req['results'])
   end
 
+  keep= []
   cvs.each do |cv|
-    keep = []
+    puts_verbose("if #{cv['name']} and #{cv_name}")
     if cv['name'] == cv_name 
       puts_verbose "Inspecting #{cv['name']}"
       cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
+        # make sure the version exist in any lifecycle env
         if not version['environment_ids'].empty?
           puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) is published to the following environments: #{version['environment_ids']}"
-	  if version['environment_ids'].include?(le_id)
-	  	puts_verbose "FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) is in Lifecycle Environment ID #{le_id}"
-		return version
-	  end
-         next
+          # return cv versions if it exist in lifecycle environt
+          if version['environment_ids'].include?(le_id)
+            puts_verbose "FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) is in Lifecycle Environment ID #{le_id}"
+            keep << version
+          end
         end
       end
     end
   end
+  puts_verbose(keep)
+  return keep.first
 end
 
 def promote(cv_version_id, lifecycle_environment_id)
   tasks = []
-
   req = @api.resource(:content_view_versions).call(:promote, {:id => cv_version_id, :environment_id => lifecycle_environment_id})
-  tasks << req['id']
-  wait(tasks)
+  if req['id']
+    puts_verbose("Task #{req['id']} started")
+
+    tasks << req['id']
+    wait(tasks)
+  end
 end
 
 def wait(tasks)
@@ -286,22 +279,27 @@ if action == 'promote'
 	puts "Lifecycle to recieve new content: #{@options[:lifecycle]}"
 	puts "Content View to be targeted: #{@options[:content_view]}"
 	
-	next_lifecycle_environment       = get_lifecycle_environment(@options[:lifecycle])
+	next_lifecycle_environment  = get_lifecycle_environment(@options[:lifecycle])
 	prior_lifecycle_environment = get_previous_lifecycle_environment(@options[:lifecycle])
 
 	puts_verbose "Fetching CV version from previous Lifecycle Environment: #{prior_lifecycle_environment['name']}"
-	cv_version 		    = get_cv_version_in_lifecycle_environment(@options[:content_view], prior_lifecycle_environment['name'])
+	cv_version = get_cv_version_in_lifecycle_environment(@options[:content_view], prior_lifecycle_environment['name'])
 	puts_verbose "Found CV Version: #{cv_version['id']}"
 
-
 	# Check if the CV version already exists in the environment we try to promote to
-	if cv_version['id'] == get_cv_version_in_lifecycle_environment(@options[:content_view], @options[:lifecycle])['id']
-		puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) already exists in Lifecycle Environment #{@options[:lifecycle]}"
-		puts "No action needed.."
-	else
-		puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) will be promoted to Lifecycle Environment #{@options[:lifecycle]}"
-		promote(cv_version['id'],next_lifecycle_environment['id'])
-	end
+  prev_cv_version = get_cv_version_in_lifecycle_environment(@options[:content_view], @options[:lifecycle])
+
+  # If the LE doesn't contain a CV version it shouldn't fail
+  if not prev_cv_version.nil?
+    if cv_version['id'] == prev_cv_version['id']
+      puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) already exists in Lifecycle Environment #{@options[:lifecycle]}"
+      puts "No action needed.."
+      exit 0 
+    end
+  else
+    puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) will be promoted to Lifecycle Environment #{@options[:lifecycle]}"
+  end
+  promote(cv_version['id'],next_lifecycle_environment['id'])
 
 end
 
