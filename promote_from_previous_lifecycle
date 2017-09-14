@@ -150,8 +150,8 @@ end
 #end
 #
 
+#Set up connection
 @api = ApipieBindings::API.new({:uri => @options[:uri], :username => @options[:user], :password => @options[:pass], :api_version => '2', :timeout => @options[:timeout]}, {:verify_ssl => @options[:verify_ssl]})
-
 
 
 def puts_verbose(message)
@@ -160,6 +160,7 @@ def puts_verbose(message)
   end
 end
 
+# return Lifecycle Environment object
 def get_lifecycle_environment(le_name)
 
   lifecycle_environment = []
@@ -212,23 +213,21 @@ def get_cv_version_in_lifecycle_environment(cv_name, le_name)
 
   keep= []
   cvs.each do |cv|
-    puts_verbose("if #{cv['name']} and #{cv_name}")
-    if cv['name'] == cv_name 
-      puts_verbose "Inspecting #{cv['name']}"
-      cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
-        # make sure the version exist in any lifecycle env
-        if not version['environment_ids'].empty?
-          puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) is published to the following environments: #{version['environment_ids']}"
-          # return cv versions if it exist in lifecycle environt
-          if version['environment_ids'].include?(le_id)
-            puts_verbose "FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) is in Lifecycle Environment ID #{le_id}"
-            keep << version
-          end
+    next if not cv['name'].include?(cv_name)
+    puts_verbose "Checking what version of #{cv['name']} is in LE: #{le_name}(#{le_id})"
+    cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
+      # make sure the version exist in any lifecycle env
+      if not version['environment_ids'].empty?
+        puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) exists in the following environments: #{version['environment_ids']}"
+        # return cv versions if it exist in lifecycle environt
+        if version['environment_ids'].include?(le_id)
+          puts_verbose "  MATCH: #{cv['name']} v#{version['version']} (id: #{version['id']}) is in Lifecycle Environment ID #{le_id}"
+          keep << version
+          break
         end
       end
     end
   end
-  puts_verbose(keep)
   return keep.first
 end
 
@@ -296,9 +295,8 @@ if action == 'promote'
       puts "No action needed.."
       exit 0 
     end
-  else
-    puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) will be promoted to Lifecycle Environment #{@options[:lifecycle]}"
   end
+  puts "Content View #{@options[:content_view]} Version: #{cv_version['version']} (cvv-id: #{cv_version['id']}) will be promoted to Lifecycle Environment #{@options[:lifecycle]}"
   promote(cv_version['id'],next_lifecycle_environment['id'])
 
 end
