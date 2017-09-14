@@ -222,40 +222,6 @@ def get_previous_lifecycle_environment(le_name)
 	end
 end
 
-
-
-def get_cv_version_in_lifecycle_environment(cv_name, le_name)
-
-  lifecycle_environment = get_lifecycle_environment(le_name)
-  le_id = lifecycle_environment['id']
-  puts_verbose "Lifecycle Environment #{le_name} has id: #{le_id}"
-
-  cvs = []
-  req = @api.resource(:content_views).call(:index, {:organization_id => @options[:org], :full_results => true})
-  cvs.concat(req['results'])
-  while (req['results'].length == req['per_page'].to_i)
-    req = @api.resource(:content_views).call(:index, {:organization_id => @options[:org], :full_results => true, :per_page => req['per_page'], :page => req['page'].to_i+1})
-    cvs.concat(req['results'])
-  end
-
-  cvs.each do |cv|
-    keep = []
-    if cv['name'] == cv_name 
-      puts_verbose "Inspecting #{cv['name']}"
-      cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
-        if not version['environment_ids'].empty?
-          puts_verbose " #{cv['name']} v#{version['version']} (id: #{version['id']}) is published to the following environments: #{version['environment_ids']}"
-	  if version['environment_ids'].include?(le_id)
-	  	puts_verbose "FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) is in Lifecycle Environment ID #{le_id}"
-		return version
-	  end
-         next
-        end
-      end
-    end
-  end
-end
-
 def get_repo_id(repo_name)
   repo_id = get_resource_id(:repositories, repo_name)
 end
@@ -284,11 +250,48 @@ def get_resource(resource_type, resource_id)
 	req = @api.resource(resource_type).call(:show, {:organization_id => @options[:org], :id => resource_id})
 end
 
+# Call the incremental update 
+def incremental_update(le_id, ccv_id, package_ids)
+  tasks=[]
+
+  description = "Incremental Update \n Fast Track for packages: #{package_ids}"
+  req = @api.resource(:content_view_versions).call(:incremental_update,
+                                                   {
+                                                   :content_view_version_environments => [{ 
+                                                            :content_view_version_id => ccv_id,
+                                                            :environment_ids => [ le_id ]
+                                                   }],
+                                                   :add_content => {
+                                                        :package_ids => package_ids
+                                                   },
+                                                   :description => description
+                                                   })
+  tasks << req['id']
+  wait(tasks)
+  
+end
+
+def identify_cvv_in_le(cv, le_id)
+  puts_verbose("Finding #{cv['name']} versions belonging to Lifecycle Environment ID #{le_id}")
+
+  cvv_id = "" 
+  cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
+    if not version['environment_ids'].empty?
+      if version['environment_ids'].include?(le_id)
+        puts_verbose "    FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) in LE: #{le_id}"
+        return version['id']
+      end
+    end
+  end
+end
+
 
 action = ARGV.shift
 
 repo_id = get_repo_id("repo-puppet-deps-rpms")
 puts_verbose("Repo ID: #{repo_id}")
+
+package_ids = [17210]
 
 # Fetch CV information
 cv_id = get_cv_id("cv-puppet-deps")
@@ -315,29 +318,30 @@ end
 #  le_cvvs << { le => ['1','2'] }
 #end
 
-le_cvvs=[]
+le_cvv=[]
 # Get CV version for every lifecycle, and save that to hash
 # It's the cv verison we need to target for incremental update later
 for le_id in le_ids do
   if cv['composite']
     puts "CV is composit"
-  else
-    puts_verbose("Finding #{cv['name']} versions belonging to Lifecycle Environment ID #{le_id}")
-
-    cvvs = []
-
-    cv['versions'].sort_by { |v| v['version'].to_f }.reverse.each do |version|
-      if not version['environment_ids'].empty?
-        if version['environment_ids'].include?(le_id)
-          puts_verbose "    FOUND: #{cv['name']} v#{version['version']} (id: #{version['id']}) in LE: #{le_id}"
-          puts_verbose "    +Adding #{cv['name']} v#{version['version']} (id: #{version['id']}) to incremental update list"
-          cvvs << version['id']
-        end
+    cv['component_ids'].each do |cv_id|
+      cv = get_resource(:content_view, cv_id)
+      if cv['repositories'].include?(repo_id)
+        cvv_id = identify_cvv_in_le(cv, le_id)
+        le_cvv << { le_id => cvv_id }
       end
     end
-    le_cvvs << { le_id => cvvs }
+  else
+    cvv_id = identify_cvv_in_le(cv, le_id)
+    le_cvv << { le_id => cvv_id }
   end
 end
-
-puts le_cvvs
-
+puts le_cvv
+puts "schedule incremental update with:"
+le_cvv.each do |row|
+  row.each do |le, cvv|
+    puts "incremental_update(le #{le}, cvv #{cvv}, package_ids)"
+    incremental_update(le, cvv, package_ids)
+    sleep(10)
+  end
+end
